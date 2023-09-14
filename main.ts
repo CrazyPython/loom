@@ -5,7 +5,13 @@ import {
   loomEditorPluginSpec,
   MakePromptFromPassagesModal,
 } from './views';
-import { PROVIDERS, Provider, LoomSettings, Node, NoteState } from './common';
+import {
+  Provider,
+  LoomSettings,
+  SearchResultState,
+  Node,
+  NoteState
+} from './common';
 
 import {
   App,
@@ -69,6 +75,7 @@ const DEFAULT_SETTINGS: LoomSettings = {
   n: 5,
 
   showSettings: false,
+  showSearchBar: false,
   showNodeBorders: false,
   showExport: false,
 };
@@ -153,6 +160,7 @@ export default class LoomPlugin extends Plugin {
 	  collapsed: false,
 	  unread,
 	  bookmarked: false,
+	  searchResultState: null,
 	};
 	return [id, node];
   }
@@ -162,6 +170,7 @@ export default class LoomPlugin extends Plugin {
     this.state[file.path] = {
 	  current: rootId,
       hoisted: [] as string[],
+	  searchTerm: "",
       nodes: { [rootId]: root },
 	  generating: null,
     };
@@ -195,7 +204,7 @@ export default class LoomPlugin extends Plugin {
     return text;
   }
 
-  breakAtPoint(file: TFile): string {
+  breakAtPoint(file: TFile): (string | null)[] {
     // split the current node into:
     //   - parent node with text before cursor
     //   - child node with text after cursor
@@ -220,7 +229,7 @@ export default class LoomPlugin extends Plugin {
       if (i < familyTexts[n].length) break;
 	  // if the cursor is at the end of the last node, don't split, just return the current node
       if (n === family.length - 1)
-		return current;
+		return [current, null];
       i -= familyTexts[n].length;
       n++;
     }
@@ -247,7 +256,7 @@ export default class LoomPlugin extends Plugin {
     // move the children to under the after node
     children.forEach((child) => (child.parentId = childId));
 
-    return parentNode;
+    return [parentNode, childId];
   }
 
   async onload() {
@@ -358,6 +367,16 @@ export default class LoomPlugin extends Plugin {
       checkCallback: (checking: boolean) =>
         withState(checking, (state) => {
           this.app.workspace.trigger("loom:break-at-point", state.current);
+        }),
+      hotkeys: [{ modifiers: ["Alt"], key: "s" }],
+    });
+
+    this.addCommand({
+      id: "break-at-point-create-child",
+      name: "Split at current point and create child",
+      checkCallback: (checking: boolean) =>
+        withState(checking, (state) => {
+          this.app.workspace.trigger("loom:break-at-point-create-child", state.current);
         }),
       hotkeys: [{ modifiers: ["Alt"], key: "c" }],
     });
@@ -472,7 +491,7 @@ export default class LoomPlugin extends Plugin {
           checking,
           (state) => canDelete(state, state.current, checking),
           (state) => {
-            this.app.workspace.trigger("loom:delete", state.current);
+            this.app.workspace.trigger("loom:delete", [state.current]);
           }
         ),
       hotkeys: [{ modifiers: ["Alt"], key: "Backspace" }],
@@ -582,6 +601,7 @@ export default class LoomPlugin extends Plugin {
             this.state[view.file.path] = {
               current,
               hoisted: [] as string[],
+			  searchTerm: "",
               nodes: { [current]: node },
               generating: null,
             };
@@ -765,7 +785,17 @@ export default class LoomPlugin extends Plugin {
       // @ts-expect-error
       this.app.workspace.on("loom:break-at-point", () =>
         this.withFile((file) => {
-          const parentId = this.breakAtPoint(file);
+          const [, childId] = this.breakAtPoint(file);
+		  if (childId) this.app.workspace.trigger("loom:switch-to", childId);
+		})
+      )
+    );
+
+    this.registerEvent(
+      // @ts-expect-error
+      this.app.workspace.on("loom:break-at-point-create-child", () =>
+        this.withFile((file) => {
+          const [parentId] = this.breakAtPoint(file);
           if (parentId !== undefined) {
 			const [newId, newNode] = this.newNode("", parentId);
 			this.state[file.path].nodes[newId] = newNode;
@@ -797,25 +827,26 @@ export default class LoomPlugin extends Plugin {
 
 		  // switch to the merged node and delete the child node
           this.app.workspace.trigger("loom:switch-to", parentId);
-          this.app.workspace.trigger("loom:delete", id);
+          this.app.workspace.trigger("loom:delete", [id]);
         })
       )
     );
 
     this.registerEvent(
       // @ts-expect-error
-      this.app.workspace.on("loom:delete", (id: string) =>
+      this.app.workspace.on("loom:delete", (ids: string[]) =>
         this.wftsar((file) => {
 		  const state = this.state[file.path];
-		  if (!canDelete(state, id, false)) return;
-		  const parentId = state.nodes[id].parentId;
 
-		  // remove the node from the hoist stack
-          this.state[file.path].hoisted = state.hoisted.filter((id_) => id_ !== id);
+		  ids = ids.filter((id) => canDelete(state, id, false));
+		  if (ids.length === 0) return;
 
-		  // add the node and its descendants to a list of nodes to delete
+		  // remove the nodes from the hoist stack
+          this.state[file.path].hoisted = state.hoisted.filter((id) => !ids.includes(id));
 
-		  let deleted = [id];
+		  // add the nodes and their descendants to a list of nodes to delete
+
+		  let deleted = [...ids];
 
 		  const addChildren = (id: string) => {
 			const children = Object.entries(state.nodes)
@@ -824,10 +855,11 @@ export default class LoomPlugin extends Plugin {
 			deleted = deleted.concat(children);
 			children.forEach(addChildren);
 		  }
-		  addChildren(id);
+		  ids.forEach(addChildren);
 
 		  // if the current node will be deleted, switch to its next sibling or its closest ancestor
 		  if (deleted.includes(state.current)) {
+            const parentId = state.nodes[state.current].parentId;
 	    	const siblings = Object.entries(state.nodes)
 	    	  .filter(([, node]) => node.parentId === parentId)
 	    	  .map(([id]) => id);
@@ -877,8 +909,7 @@ export default class LoomPlugin extends Plugin {
           const children = Object.entries(this.state[file.path].nodes)
 		    .filter(([, node]) => node.parentId === id)
 			.map(([id]) => id);
-          for (const id of children)
-            this.app.workspace.trigger("loom:delete", id);
+		  this.app.workspace.trigger("loom:delete", children);
         })
       )
     );
@@ -891,8 +922,7 @@ export default class LoomPlugin extends Plugin {
           const siblings = Object.entries(this.state[file.path].nodes)
 		    .filter(([id_, node]) => node.parentId === parentId && id_ !== id)
 			.map(([id]) => id);
-          for (const id of siblings)
-            this.app.workspace.trigger("loom:delete", id);
+		  this.app.workspace.trigger("loom:delete", siblings);
         })
       )
     );
@@ -919,6 +949,45 @@ export default class LoomPlugin extends Plugin {
         }
       )
     );
+
+	this.registerEvent(
+	  // @ts-expect-error
+	  this.app.workspace.on("loom:search", (term: string) => this.withFile((file) => {
+		const state = this.state[file.path];
+
+        this.state[file.path].searchTerm = term;
+		if (!term) {
+		  Object.keys(state.nodes).forEach((id) => {
+		    this.state[file.path].nodes[id].searchResultState = null;
+		  });
+		  this.save(); // don't re-render
+		  return;
+		}
+
+		const matches = Object.entries(state.nodes)
+		  .filter(([, node]) => node.text.toLowerCase().includes(term.toLowerCase()))
+		  .map(([id]) => id);
+
+		let ancestors: string[] = [];
+		for (const id of matches) {
+		  let parentId = state.nodes[id].parentId;
+		  while (parentId !== null) {
+			ancestors.push(parentId);
+			parentId = state.nodes[parentId].parentId;
+		  }
+		}
+
+		Object.keys(state.nodes).forEach((id) => {
+		  let searchResultState: SearchResultState;
+		  if (matches.includes(id)) searchResultState = "result";
+		  else if (ancestors.includes(id)) searchResultState = "ancestor";
+		  else searchResultState = "none";
+		  this.state[file.path].nodes[id].searchResultState = searchResultState;
+		});
+
+		this.save();
+	  }))
+	);
 
     this.registerEvent(
       // @ts-expect-error
@@ -1421,22 +1490,6 @@ class LoomSettingTab extends PluginSettingTab {
     method2.createEl("kbd", { text: "Loom: Open Loom pane" });
     method2.createEl("span", { text: " command." });
 
-    new Setting(containerEl).setName("Provider").addDropdown((dropdown) => {
-      dropdown.addOption("cohere", "Cohere");
-      dropdown.addOption("textsynth", "TextSynth");
-      dropdown.addOption("ocp", "OpenAI code-davinci-002 proxy");
-      dropdown.addOption("openai", "OpenAI (Completion)");
-      dropdown.addOption("openai-chat", "OpenAI (Chat)");
-      dropdown.addOption("azure", "Azure (Completion)");
-      dropdown.addOption("azure-chat", "Azure (Chat)");
-      dropdown.setValue(this.plugin.settings.provider);
-      dropdown.onChange(async (value) => {
-        if (PROVIDERS.find((provider) => provider === value))
-          this.plugin.settings.provider = value;
-        await this.plugin.save();
-      });
-    });
-
     const apiKeySetting = (name: string, key: LoomSettingStringKey) => {
       new Setting(containerEl)
         .setName(`${name} API key`)
@@ -1468,10 +1521,6 @@ class LoomSettingTab extends PluginSettingTab {
 
 	const idSetting = (name: string, key: LoomSettingKey) =>
 	  setting(name, key, (value) => value, (text) => text);
-	const intSetting = (name: string, key: LoomSettingKey) =>
-	  setting(name, key, (value) => value.toString(), (text) => parseInt(text));
-	const floatSetting = (name: string, key: LoomSettingKey) =>
-      setting(name, key, (value) => value.toString(), (text) => parseFloat(text));
 
     apiKeySetting("Cohere", "cohereApiKey");
     apiKeySetting("TextSynth", "textsynthApiKey");
@@ -1504,13 +1553,5 @@ class LoomSettingTab extends PluginSettingTab {
 	
     idSetting("Default passage separator", "defaultPassageSeparator");
     idSetting("Default passage frontmatter", "defaultPassageFrontmatter");
-	
-	idSetting("Model", "model");
-	intSetting("Length (in tokens)", "maxTokens");
-	floatSetting("Temperature", "temperature");
-	floatSetting("Top p", "topP");
-	floatSetting("Frequency penalty", "frequencyPenalty");
-	floatSetting("Presence penalty", "presencePenalty");
-	floatSetting("Number of completions", "n");
   }
 }
