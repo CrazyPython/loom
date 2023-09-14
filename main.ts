@@ -1295,6 +1295,8 @@ export default class LoomPlugin extends Plugin {
             return 4097;
           } else if (model === 'text-davinci-003' || model === 'text-davinci-002') {
             return 4097;
+          } else if (model === 'davinci-002' || model === 'babbage-002') {
+            return 16385;
           } else if (
             model.includes("ada") ||
             model.includes("babbage") ||
@@ -1309,7 +1311,7 @@ export default class LoomPlugin extends Plugin {
     }
 
 
-  trimOpenAIPrompt(prompt: string) {
+  trimOpenAIPrompt(prompt: string, maxTokens: number) {
     const cl100kModels = ["gpt-4-32k", "gpt-4-0314", "gpt-4-32k-0314", "gpt-3.5-turbo", "gpt-3.5-turbo-0301", "gpt-4-base"];
 	const p50kModels = ["text-davinci-003", "text-davinci-002", "code-davinci-002", "code-davinci-001", "code-cushman-002", "code-cushman-001", "davinci-codex", "cushman-codex"];
 	// const r50kModels = ["text-davinci-001", "text-curie-001", "text-babbage-001", "text-ada-001", "davinci", "curie", "babbage", "ada"];
@@ -1319,11 +1321,11 @@ export default class LoomPlugin extends Plugin {
 	else if (p50kModels.includes(this.settings.model)) tokenizer = p50k;
     else tokenizer = r50k; // i expect that an unknown model will most likely be r50k
 
-	return tokenizer.decode(tokenizer.encode(prompt, { disallowedSpecial: new Set() }).slice(-this.maxTokenLength(this.settings.model)+1)); // TODO context length depends on model
+	return tokenizer.decode(tokenizer.encode(prompt, { disallowedSpecial: new Set() }).slice(-this.maxTokenLength(this.settings.model)+1+maxTokens));
   }
 
   async completeOCP(prompt: string) {
-	prompt = this.trimOpenAIPrompt(prompt);
+	prompt = this.trimOpenAIPrompt(prompt, this.settings.maxTokens);
 
     let url = this.settings.ocpUrl;
 
@@ -1359,7 +1361,7 @@ export default class LoomPlugin extends Plugin {
   }
 
   async completeOpenAI(prompt: string) {
-	prompt = this.trimOpenAIPrompt(prompt);
+	prompt = this.trimOpenAIPrompt(prompt, this.settings.maxTokens);
 	let result: CompletionResult;
 	try {
 	  const response = await this.openai.createCompletion({
@@ -1380,7 +1382,7 @@ export default class LoomPlugin extends Plugin {
   }
 
   async completeOpenAIChat(prompt: string) {
-	prompt = this.trimOpenAIPrompt(prompt);
+	prompt = this.trimOpenAIPrompt(prompt, this.settings.maxTokens);
 	let result: CompletionResult;
 	try {
 	  const response = await this.openai.createChatCompletion({
@@ -1401,7 +1403,7 @@ export default class LoomPlugin extends Plugin {
   }
 
   async completeAzure(prompt: string) {
-	prompt = this.trimOpenAIPrompt(prompt);
+	prompt = this.trimOpenAIPrompt(prompt, this.settings.maxTokens);
 	let result: CompletionResult;
 	try {
 	  const response = await this.azure.createCompletion({
@@ -1422,7 +1424,7 @@ export default class LoomPlugin extends Plugin {
   }
 
   async completeAzureChat(prompt: string) {
-	prompt = this.trimOpenAIPrompt(prompt);
+	prompt = this.trimOpenAIPrompt(prompt, this.settings.maxTokens);
 	let result: CompletionResult;
 	try {
 	  const response = await this.azure.createChatCompletion({
